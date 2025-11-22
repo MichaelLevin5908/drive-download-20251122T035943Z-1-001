@@ -164,23 +164,22 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
-        // A source becomes ready the cycle AFTER its producer completes STATE UPDATE
-        // Per assignment: "X can be executed in cycle T+1, where T is the cycle in which Y is in state update"
+        // A source becomes ready when producer completes EXECUTION (result available on CDB)
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
                     // Only update if not already ready
                     if (!inst.src_ready[i] && inst.src_producer[i] != -1) {
-                        // Check if producer completed state update IN A PREVIOUS CYCLE
+                        // Check if producer completed execution
                         bool producer_completed = false;
                         bool producer_found_in_rs = false;
 
-                        // Check if producer is in RS and has completed state update
+                        // Check if producer is in RS and has completed execution
                         for (const auto& rs_inst : schedule_queue) {
                             if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                                 producer_found_in_rs = true;
-                                // Ready only if state update happened in a PREVIOUS cycle, not current cycle
-                                if (rs_inst.state_update_cycle > 0 && rs_inst.state_update_cycle < current_cycle) {
+                                // Ready if execution completed
+                                if (rs_inst.execution_complete) {
                                     producer_completed = true;
                                 }
                                 break;
@@ -212,8 +211,8 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 4. Schedule: Move READY instructions from dispatch queue to RS
-        // This happens in first half, BEFORE firing, so newly scheduled instructions can fire immediately
-        // Scan entire dispatch queue from head to tail (per assignment spec)
+        // Per spec: "The dispatch unit reserves slots in the scheduling queues" (step 4, first half)
+        // Scan dispatch queue from head to tail, schedule ready instructions (out-of-order allowed)
         auto it = dispatch_queue.begin();
         while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
             proc_inst_t inst = *it;
@@ -226,16 +225,16 @@ void run_proc(proc_stats_t* p_stats)
                     // No producer, source is ready
                     continue;
                 } else {
-                    // Check if producer has already completed state update IN A PREVIOUS CYCLE
+                    // Check if producer has completed execution
                     bool producer_completed = false;
                     bool producer_found_in_rs = false;
 
-                    // Check if producer is in RS and has completed state update
+                    // Check if producer is in RS and has completed execution
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                             producer_found_in_rs = true;
-                            // Ready only if state update happened in a PREVIOUS cycle
-                            if (rs_inst.state_update_cycle > 0 && rs_inst.state_update_cycle < current_cycle) {
+                            // Ready if execution completed (result on CDB)
+                            if (rs_inst.execution_complete) {
                                 producer_completed = true;
                             }
                             break;
@@ -276,13 +275,13 @@ void run_proc(proc_stats_t* p_stats)
 
                 it = dispatch_queue.erase(it);  // Remove and advance iterator
             } else {
-                // Not ready - skip to next instruction in DQ
+                // Not ready - skip to next in DQ
                 ++it;
             }
         }
 
         // 5. Fire ready instructions to function units (in tag order)
-        // This happens AFTER scheduling so newly scheduled instructions can fire immediately (same cycle)
+        // First half: happens after scheduling so newly scheduled instructions can fire same cycle
         std::vector<proc_inst_t*> ready_to_fire;
         for (auto& inst : schedule_queue) {
             if (!inst.fired && inst.src_ready[0] && inst.src_ready[1]) {
