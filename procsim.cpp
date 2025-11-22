@@ -151,14 +151,7 @@ void run_proc(proc_stats_t* p_stats)
             fflush(stdout);
         }
 
-        // Remove retired instructions from RS
-        for (uint64_t tag : tags_to_remove) {
-            schedule_queue.erase(
-                std::remove_if(schedule_queue.begin(), schedule_queue.end(),
-                    [tag](const proc_inst_t& inst) { return inst.tag == tag; }),
-                schedule_queue.end()
-            );
-        }
+        // NOTE: Do NOT remove from RS here - do it in second half after schedule stage
 
         // 2. Check for completed executions (latency = 1, so instructions that fired this OR last cycle complete)
         for (auto& inst : schedule_queue) {
@@ -171,15 +164,18 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
+        // IMPORTANT: Once a source becomes ready, it stays ready!
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
-                    if (inst.src_reg[i] == -1) {
-                        inst.src_ready[i] = true;
-                    } else {
-                        // Source is ready if: register is ready OR written by this instruction (no self-dependency)
-                        inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1 ||
-                                              register_ready[inst.src_reg[i]] == (int64_t)inst.tag);
+                    // Only update if not already ready
+                    if (!inst.src_ready[i]) {
+                        if (inst.src_reg[i] == -1) {
+                            inst.src_ready[i] = true;
+                        } else {
+                            // Source becomes ready when register is ready
+                            inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1);
+                        }
                     }
                 }
             }
@@ -244,14 +240,17 @@ void run_proc(proc_stats_t* p_stats)
 
             inst.schedule_cycle = current_cycle;
 
-            // Check ready bits
+            // Check ready bits at schedule time
             for (int i = 0; i < 2; i++) {
                 if (inst.src_reg[i] == -1) {
                     inst.src_ready[i] = true;
+                } else if (inst.src_reg[i] == inst.dest_reg) {
+                    // Self-dependency: instruction reads and writes same register
+                    // This is always ready (no actual dependency)
+                    inst.src_ready[i] = true;
                 } else {
-                    // Source is ready if: register is ready OR written by this instruction (no self-dependency)
-                    inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1 ||
-                                          register_ready[inst.src_reg[i]] == (int64_t)inst.tag);
+                    // Source is ready if register is currently ready
+                    inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1);
                 }
             }
 
@@ -275,7 +274,16 @@ void run_proc(proc_stats_t* p_stats)
         }
         fetch_buffer.clear();
 
-        // 7. Fetch: Read instructions from stdin into fetch buffer
+        // 7. Remove state-updated instructions from RS (second half cycle)
+        for (uint64_t tag : tags_to_remove) {
+            schedule_queue.erase(
+                std::remove_if(schedule_queue.begin(), schedule_queue.end(),
+                    [tag](const proc_inst_t& inst) { return inst.tag == tag; }),
+                schedule_queue.end()
+            );
+        }
+
+        // 8. Fetch: Read instructions from stdin into fetch buffer
         if (!done_fetching) {
             for (uint64_t i = 0; i < g_f; i++) {
                 proc_inst_t inst;
@@ -308,6 +316,12 @@ void run_proc(proc_stats_t* p_stats)
                    fetch_buffer.empty() &&
                    dispatch_queue.empty() &&
                    schedule_queue.empty();
+
+        // Debug: print status when stuck (but don't exit, just monitor)
+        if (current_cycle % 10000 == 0 && schedule_queue.size() == g_rs_size) {
+            fprintf(stderr, "Cycle %lu: RS full (%lu/%lu), disp_q=%lu\n",
+                    current_cycle, schedule_queue.size(), g_rs_size, dispatch_queue.size());
+        }
     }
 
     p_stats->cycle_count = current_cycle;
