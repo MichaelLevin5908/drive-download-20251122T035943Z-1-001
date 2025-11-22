@@ -220,11 +220,9 @@ void run_proc(proc_stats_t* p_stats)
         // ==================================================================
 
         // 5. Schedule: Move READY instructions from dispatch queue to RS
-        // Can schedule out of program order - scan entire dispatch queue for ready instructions
-        size_t scheduled_this_cycle = 0;
-        auto dq_it = dispatch_queue.begin();
-        while (dq_it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
-            proc_inst_t inst = *dq_it;
+        // CONSERVATIVE: Only schedule from head (in program order), can't skip blocked instructions
+        while (!dispatch_queue.empty() && schedule_queue.size() < g_rs_size) {
+            proc_inst_t inst = dispatch_queue.front();
 
             inst.schedule_cycle = current_cycle;
 
@@ -237,20 +235,22 @@ void run_proc(proc_stats_t* p_stats)
                 } else {
                     // Check if producer has already completed state update
                     bool producer_completed = false;
+                    bool producer_found_in_rs = false;
 
-                    // Check if producer is in RS and has completed state update
+                    // Check if producer is in RS and has completed execution
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
-                            // Producer completed if it did state update (will be removed soon)
-                            if (rs_inst.state_update_cycle != 0) {
+                            producer_found_in_rs = true;
+                            // Producer completed if it finished execution (value available on result bus)
+                            if (rs_inst.execution_complete) {
                                 producer_completed = true;
                             }
                             break;
                         }
                     }
 
-                    // If not in RS, check if in DQ (not completed yet)
-                    if (!producer_completed) {
+                    // If not in RS, check if in DQ or already completed
+                    if (!producer_found_in_rs) {
                         bool producer_in_dq = false;
                         for (const auto& dq_inst : dispatch_queue) {
                             if (dq_inst.tag == (uint64_t)inst.src_producer[i]) {
@@ -259,7 +259,7 @@ void run_proc(proc_stats_t* p_stats)
                             }
                         }
 
-                        // If not in DQ, it completed in a previous cycle
+                        // If not in RS and not in DQ, it completed in a previous cycle
                         if (!producer_in_dq) {
                             producer_completed = true;
                         }
@@ -277,16 +277,13 @@ void run_proc(proc_stats_t* p_stats)
                 inst.src_ready[0] = true;
                 inst.src_ready[1] = true;
 
+                dispatch_queue.pop_front();
                 schedule_queue.push_back(inst);
                 printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
                 fflush(stdout);
-
-                // Remove from dispatch queue
-                dq_it = dispatch_queue.erase(dq_it);
-                scheduled_this_cycle++;
             } else {
-                // Move to next instruction in dispatch queue
-                ++dq_it;
+                // Head instruction not ready - stop scheduling (must maintain program order)
+                break;
             }
         }
 
