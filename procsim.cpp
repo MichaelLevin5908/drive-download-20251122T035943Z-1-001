@@ -164,13 +164,14 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
-        // A source becomes ready after its producer completes STATE UPDATE (writes to register file)
+        // A source becomes ready the cycle AFTER its producer completes STATE UPDATE
+        // Per assignment: "X can be executed in cycle T+1, where T is the cycle in which Y is in state update"
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
                     // Only update if not already ready
                     if (!inst.src_ready[i] && inst.src_producer[i] != -1) {
-                        // Check if producer completed state update
+                        // Check if producer completed state update IN A PREVIOUS CYCLE
                         bool producer_completed = false;
                         bool producer_found_in_rs = false;
 
@@ -178,7 +179,8 @@ void run_proc(proc_stats_t* p_stats)
                         for (const auto& rs_inst : schedule_queue) {
                             if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                                 producer_found_in_rs = true;
-                                if (rs_inst.state_update_cycle > 0) {
+                                // Ready only if state update happened in a PREVIOUS cycle, not current cycle
+                                if (rs_inst.state_update_cycle > 0 && rs_inst.state_update_cycle < current_cycle) {
                                     producer_completed = true;
                                 }
                                 break;
@@ -211,25 +213,20 @@ void run_proc(proc_stats_t* p_stats)
 
         // 4. Schedule: Move READY instructions from dispatch queue to RS
         // This happens in first half, BEFORE firing, so newly scheduled instructions can fire immediately
-        // Hybrid approach: scan from head, schedule ready instructions up to a window limit
-        // This provides some out-of-order capability while maintaining program order preference
-        size_t scheduled_this_cycle = 0;
-        size_t scan_limit = 7;  // Limit how far we scan into DQ
-        size_t scanned = 0;
+        // Scan entire dispatch queue from head to tail (per assignment spec)
         auto it = dispatch_queue.begin();
-        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size && scanned < scan_limit) {
+        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
             proc_inst_t inst = *it;
             inst.schedule_cycle = current_cycle;
-            scanned++;
 
-            // Check if sources are ready
+            // Check if sources are ready (same timing as ready bit update above)
             bool all_ready = true;
             for (int i = 0; i < 2; i++) {
                 if (inst.src_producer[i] == -1) {
                     // No producer, source is ready
                     continue;
                 } else {
-                    // Check if producer has already completed state update
+                    // Check if producer has already completed state update IN A PREVIOUS CYCLE
                     bool producer_completed = false;
                     bool producer_found_in_rs = false;
 
@@ -237,8 +234,8 @@ void run_proc(proc_stats_t* p_stats)
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                             producer_found_in_rs = true;
-                            // Producer completed if it finished state update (value written to register file)
-                            if (rs_inst.state_update_cycle > 0) {
+                            // Ready only if state update happened in a PREVIOUS cycle
+                            if (rs_inst.state_update_cycle > 0 && rs_inst.state_update_cycle < current_cycle) {
                                 producer_completed = true;
                             }
                             break;
@@ -278,7 +275,6 @@ void run_proc(proc_stats_t* p_stats)
                 fflush(stdout);
 
                 it = dispatch_queue.erase(it);  // Remove and advance iterator
-                scheduled_this_cycle++;
             } else {
                 // Not ready - skip to next instruction in DQ
                 ++it;
