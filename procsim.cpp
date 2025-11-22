@@ -319,8 +319,9 @@ void run_proc(proc_stats_t* p_stats)
 void complete_proc(proc_stats_t *p_stats)
 {
     p_stats->retired_instruction = total_retired;
-    p_stats->avg_inst_fired = (float)total_fired / (float)current_cycle;
-    p_stats->avg_inst_retired = (float)total_retired / (float)current_cycle;
-    p_stats->avg_disp_size = (float)total_dispatch_size / (float)current_cycle;
+    // Use the cycle_count that was set in run_proc for consistency
+    p_stats->avg_inst_fired = (float)total_fired / (float)p_stats->cycle_count;
+    p_stats->avg_inst_retired = (float)total_retired / (float)p_stats->cycle_count;
+    p_stats->avg_disp_size = (float)total_dispatch_size / (float)p_stats->cycle_count;
     p_stats->max_disp_size = max_dispatch_size;
 }
