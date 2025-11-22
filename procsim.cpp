@@ -153,7 +153,7 @@ void run_proc(proc_stats_t* p_stats)
 
         // NOTE: Do NOT remove from RS here - do it in second half after schedule stage
 
-        // 2. Check for completed executions (latency = 1, so instructions that fired in previous cycles complete)
+        // 2. Check for completed executions (latency = 1, so instructions that fired last cycle complete this cycle)
         for (auto& inst : schedule_queue) {
             if (inst.fired && !inst.execution_complete && inst.execute_cycle < current_cycle) {
                 inst.complete_cycle = current_cycle;
@@ -212,60 +212,6 @@ void run_proc(proc_stats_t* p_stats)
                         }
                     }
                 }
-            }
-        }
-
-        // 4. Fire ready instructions (tag order)
-        std::vector<proc_inst_t*> ready_to_fire;
-        for (auto& inst : schedule_queue) {
-            if (!inst.fired && inst.src_ready[0] && inst.src_ready[1]) {
-                ready_to_fire.push_back(&inst);
-            }
-        }
-
-        std::sort(ready_to_fire.begin(), ready_to_fire.end(),
-            [](const proc_inst_t* a, const proc_inst_t* b) { return a->tag < b->tag; });
-
-        for (auto* inst : ready_to_fire) {
-            bool fired = false;
-            int fu_type = inst->fu_type;
-
-            if (fu_type == 0) {
-                for (size_t i = 0; i < fu_k0_available.size(); i++) {
-                    if (fu_k0_available[i]) {
-                        fu_k0_available[i] = false;
-                        fired = true;
-                        break;
-                    }
-                }
-            } else if (fu_type == 1) {
-                for (size_t i = 0; i < fu_k1_available.size(); i++) {
-                    if (fu_k1_available[i]) {
-                        fu_k1_available[i] = false;
-                        fired = true;
-                        break;
-                    }
-                }
-            } else if (fu_type == 2) {
-                for (size_t i = 0; i < fu_k2_available.size(); i++) {
-                    if (fu_k2_available[i]) {
-                        fu_k2_available[i] = false;
-                        fired = true;
-                        break;
-                    }
-                }
-            }
-
-            if (fired) {
-                inst->fired = true;
-                inst->execute_cycle = current_cycle;
-                total_fired++;
-
-                // With latency=1, instruction completes in the same cycle it fires
-                inst->execution_complete = true;
-                inst->complete_cycle = current_cycle;
-                printf("%lu\tEXECUTED\t%lu\n", current_cycle, inst->tag);
-                fflush(stdout);
             }
         }
 
@@ -341,6 +287,57 @@ void run_proc(proc_stats_t* p_stats)
             } else {
                 // Move to next instruction in dispatch queue
                 ++dq_it;
+            }
+        }
+
+        // 4. Fire ready instructions to function units (in tag order)
+        // This happens AFTER scheduling so newly scheduled instructions can fire immediately
+        std::vector<proc_inst_t*> ready_to_fire;
+        for (auto& inst : schedule_queue) {
+            if (!inst.fired && inst.src_ready[0] && inst.src_ready[1]) {
+                ready_to_fire.push_back(&inst);
+            }
+        }
+
+        std::sort(ready_to_fire.begin(), ready_to_fire.end(),
+            [](const proc_inst_t* a, const proc_inst_t* b) { return a->tag < b->tag; });
+
+        for (auto* inst : ready_to_fire) {
+            bool fired = false;
+            int fu_type = inst->fu_type;
+
+            if (fu_type == 0) {
+                for (size_t i = 0; i < fu_k0_available.size(); i++) {
+                    if (fu_k0_available[i]) {
+                        fu_k0_available[i] = false;
+                        fired = true;
+                        break;
+                    }
+                }
+            } else if (fu_type == 1) {
+                for (size_t i = 0; i < fu_k1_available.size(); i++) {
+                    if (fu_k1_available[i]) {
+                        fu_k1_available[i] = false;
+                        fired = true;
+                        break;
+                    }
+                }
+            } else if (fu_type == 2) {
+                for (size_t i = 0; i < fu_k2_available.size(); i++) {
+                    if (fu_k2_available[i]) {
+                        fu_k2_available[i] = false;
+                        fired = true;
+                        break;
+                    }
+                }
+            }
+
+            if (fired) {
+                inst->fired = true;
+                inst->execute_cycle = current_cycle;
+                total_fired++;
+
+                // With latency=1, instruction will complete next cycle
             }
         }
 
