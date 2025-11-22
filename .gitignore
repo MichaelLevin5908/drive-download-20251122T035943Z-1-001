@@ -6,6 +6,7 @@ procsim
 *.log
 *_output.log
 my_gcc*.log
+my_log.txt
 
 # Test trace files (keep only original traces in traces/)
 test*.trace
