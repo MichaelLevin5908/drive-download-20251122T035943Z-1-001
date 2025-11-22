@@ -164,7 +164,7 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
-        // A source becomes ready when producer completes STATE UPDATE (writes via result bus)
+        // A source becomes ready after its producer completes STATE UPDATE (writes to register file)
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
@@ -178,7 +178,6 @@ void run_proc(proc_stats_t* p_stats)
                         for (const auto& rs_inst : schedule_queue) {
                             if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                                 producer_found_in_rs = true;
-                                // Ready if state update completed
                                 if (rs_inst.state_update_cycle > 0) {
                                     producer_completed = true;
                                 }
@@ -211,21 +210,26 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 4. Schedule: Move READY instructions from dispatch queue to RS
-        // Per spec: "The dispatch unit reserves slots in the scheduling queues" (step 4, first half)
-        // Scan dispatch queue from head to tail, schedule ready instructions (out-of-order allowed)
+        // This happens in first half, BEFORE firing, so newly scheduled instructions can fire immediately
+        // Hybrid approach: scan from head, schedule ready instructions up to a window limit
+        // This provides some out-of-order capability while maintaining program order preference
+        size_t scheduled_this_cycle = 0;
+        size_t scan_limit = 7;  // Limit how far we scan into DQ
+        size_t scanned = 0;
         auto it = dispatch_queue.begin();
-        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
+        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size && scanned < scan_limit) {
             proc_inst_t inst = *it;
             inst.schedule_cycle = current_cycle;
+            scanned++;
 
-            // Check if sources are ready (same timing as ready bit update above)
+            // Check if sources are ready
             bool all_ready = true;
             for (int i = 0; i < 2; i++) {
                 if (inst.src_producer[i] == -1) {
                     // No producer, source is ready
                     continue;
                 } else {
-                    // Check if producer has completed state update
+                    // Check if producer has already completed state update
                     bool producer_completed = false;
                     bool producer_found_in_rs = false;
 
@@ -233,7 +237,7 @@ void run_proc(proc_stats_t* p_stats)
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                             producer_found_in_rs = true;
-                            // Ready if state update completed (result written via result bus)
+                            // Producer completed if it finished state update (value written to register file)
                             if (rs_inst.state_update_cycle > 0) {
                                 producer_completed = true;
                             }
@@ -274,14 +278,15 @@ void run_proc(proc_stats_t* p_stats)
                 fflush(stdout);
 
                 it = dispatch_queue.erase(it);  // Remove and advance iterator
+                scheduled_this_cycle++;
             } else {
-                // Not ready - skip to next in DQ
+                // Not ready - skip to next instruction in DQ
                 ++it;
             }
         }
 
         // 5. Fire ready instructions to function units (in tag order)
-        // First half: happens after scheduling so newly scheduled instructions can fire same cycle
+        // This happens AFTER scheduling so newly scheduled instructions can fire immediately (same cycle)
         std::vector<proc_inst_t*> ready_to_fire;
         for (auto& inst : schedule_queue) {
             if (!inst.fired && inst.src_ready[0] && inst.src_ready[1]) {
