@@ -110,29 +110,16 @@ void run_proc(proc_stats_t* p_stats)
         for (size_t i = 0; i < completed_insts.size() && i < g_r; i++) {
             proc_inst_t* inst = completed_insts[i];
 
-            // Free FU
+            // Free the specific FU that this instruction was using
             int fu_type = inst->fu_type;
-            if (fu_type == 0) {
-                for (size_t j = 0; j < fu_k0_available.size(); j++) {
-                    // Find which FU this instruction is using (we'll just free the first non-available one)
-                    if (!fu_k0_available[j]) {
-                        fu_k0_available[j] = true;
-                        break;
-                    }
-                }
-            } else if (fu_type == 1) {
-                for (size_t j = 0; j < fu_k1_available.size(); j++) {
-                    if (!fu_k1_available[j]) {
-                        fu_k1_available[j] = true;
-                        break;
-                    }
-                }
-            } else if (fu_type == 2) {
-                for (size_t j = 0; j < fu_k2_available.size(); j++) {
-                    if (!fu_k2_available[j]) {
-                        fu_k2_available[j] = true;
-                        break;
-                    }
+            int fu_idx = inst->fu_index;
+            if (fu_idx != -1) {
+                if (fu_type == 0) {
+                    fu_k0_available[fu_idx] = true;
+                } else if (fu_type == 1) {
+                    fu_k1_available[fu_idx] = true;
+                } else if (fu_type == 2) {
+                    fu_k2_available[fu_idx] = true;
                 }
             }
 
@@ -211,16 +198,12 @@ void run_proc(proc_stats_t* p_stats)
 
         // 4. Schedule: Move READY instructions from dispatch queue to RS
         // This happens in first half, BEFORE firing, so newly scheduled instructions can fire immediately
-        // Hybrid approach: scan from head, schedule ready instructions up to a window limit
-        // This provides some out-of-order capability while maintaining program order preference
+        // Scan the entire dispatch queue from head to tail for ready instructions
         size_t scheduled_this_cycle = 0;
-        size_t scan_limit = 7;  // Limit how far we scan into DQ
-        size_t scanned = 0;
         auto it = dispatch_queue.begin();
-        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size && scanned < scan_limit) {
+        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
             proc_inst_t inst = *it;
             inst.schedule_cycle = current_cycle;
-            scanned++;
 
             // Check if sources are ready
             bool all_ready = true;
@@ -300,11 +283,13 @@ void run_proc(proc_stats_t* p_stats)
         for (auto* inst : ready_to_fire) {
             bool fired = false;
             int fu_type = inst->fu_type;
+            int fu_idx = -1;
 
             if (fu_type == 0) {
                 for (size_t i = 0; i < fu_k0_available.size(); i++) {
                     if (fu_k0_available[i]) {
                         fu_k0_available[i] = false;
+                        fu_idx = i;
                         fired = true;
                         break;
                     }
@@ -313,6 +298,7 @@ void run_proc(proc_stats_t* p_stats)
                 for (size_t i = 0; i < fu_k1_available.size(); i++) {
                     if (fu_k1_available[i]) {
                         fu_k1_available[i] = false;
+                        fu_idx = i;
                         fired = true;
                         break;
                     }
@@ -321,6 +307,7 @@ void run_proc(proc_stats_t* p_stats)
                 for (size_t i = 0; i < fu_k2_available.size(); i++) {
                     if (fu_k2_available[i]) {
                         fu_k2_available[i] = false;
+                        fu_idx = i;
                         fired = true;
                         break;
                     }
@@ -329,6 +316,7 @@ void run_proc(proc_stats_t* p_stats)
 
             if (fired) {
                 inst->fired = true;
+                inst->fu_index = fu_idx;
                 inst->execute_cycle = current_cycle;
                 total_fired++;
 
@@ -390,6 +378,7 @@ void run_proc(proc_stats_t* p_stats)
                     inst.fired = false;
                     inst.execution_complete = false;
                     inst.state_update_cycle = 0;
+                    inst.fu_index = -1;
 
                     // Handle function unit type -1 -> use type 1
                     if (inst.op_code == -1) {

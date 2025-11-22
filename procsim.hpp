@@ -31,6 +31,7 @@ typedef struct _proc_inst_t
     int64_t src_producer[2];     // Tag of instruction that will produce each source (-1 if ready)
     bool fired;                  // Has this instruction been fired to FU?
     int32_t fu_type;             // Actual FU type to use (handling -1 case)
+    int32_t fu_index;            // Which specific FU index is allocated (-1 if none)
     uint64_t complete_cycle;     // Cycle when execution completes
     bool execution_complete;     // Has execution finished (waiting for result bus)?
 
