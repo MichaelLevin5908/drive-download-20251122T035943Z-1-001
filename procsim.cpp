@@ -147,8 +147,8 @@ void run_proc(proc_stats_t* p_stats)
             tags_to_remove.push_back(inst->tag);
             total_retired++;
 
-            printf("%lu\tSTATE UPDATE\t%lu\n", current_cycle, inst->tag);
-            fflush(stdout);
+            // printf("%lu\tSTATE UPDATE\t%lu\n", current_cycle, inst->tag);
+            // fflush(stdout);
         }
 
         // NOTE: Do NOT remove from RS here - do it in second half after schedule stage
@@ -158,8 +158,8 @@ void run_proc(proc_stats_t* p_stats)
             if (inst.fired && !inst.execution_complete && inst.execute_cycle < current_cycle) {
                 inst.complete_cycle = current_cycle;
                 inst.execution_complete = true;
-                printf("%lu\tEXECUTED\t%lu\n", current_cycle, inst.tag);
-                fflush(stdout);
+                // printf("%lu\tEXECUTED\t%lu\n", current_cycle, inst.tag);
+                // fflush(stdout);
             }
         }
 
@@ -274,8 +274,8 @@ void run_proc(proc_stats_t* p_stats)
                 inst.src_ready[1] = true;
 
                 schedule_queue.push_back(inst);
-                printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
-                fflush(stdout);
+                // printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
+                // fflush(stdout);
 
                 it = dispatch_queue.erase(it);  // Remove and advance iterator
                 scheduled_this_cycle++;
@@ -366,8 +366,8 @@ void run_proc(proc_stats_t* p_stats)
             }
 
             dispatch_queue.push_back(inst);
-            printf("%lu\tDISPATCHED\t%lu\n", current_cycle, inst.tag);
-            fflush(stdout);
+            // printf("%lu\tDISPATCHED\t%lu\n", current_cycle, inst.tag);
+            // fflush(stdout);
         }
         fetch_buffer.clear();
 
@@ -399,8 +399,8 @@ void run_proc(proc_stats_t* p_stats)
                     }
 
                     fetch_buffer.push_back(inst);
-                    printf("%lu\tFETCHED\t%lu\n", current_cycle, inst.tag);
-                    fflush(stdout);
+                    // printf("%lu\tFETCHED\t%lu\n", current_cycle, inst.tag);
+                    // fflush(stdout);
                 } else {
                     done_fetching = true;
                     break;
