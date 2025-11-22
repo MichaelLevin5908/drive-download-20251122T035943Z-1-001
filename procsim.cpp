@@ -164,22 +164,22 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
-        // A source becomes ready when producer completes EXECUTION (result available on CDB)
+        // A source becomes ready when producer completes STATE UPDATE (writes via result bus)
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
                     // Only update if not already ready
                     if (!inst.src_ready[i] && inst.src_producer[i] != -1) {
-                        // Check if producer completed execution
+                        // Check if producer completed state update
                         bool producer_completed = false;
                         bool producer_found_in_rs = false;
 
-                        // Check if producer is in RS and has completed execution
+                        // Check if producer is in RS and has completed state update
                         for (const auto& rs_inst : schedule_queue) {
                             if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                                 producer_found_in_rs = true;
-                                // Ready if execution completed
-                                if (rs_inst.execution_complete) {
+                                // Ready if state update completed
+                                if (rs_inst.state_update_cycle > 0) {
                                     producer_completed = true;
                                 }
                                 break;
@@ -225,16 +225,16 @@ void run_proc(proc_stats_t* p_stats)
                     // No producer, source is ready
                     continue;
                 } else {
-                    // Check if producer has completed execution
+                    // Check if producer has completed state update
                     bool producer_completed = false;
                     bool producer_found_in_rs = false;
 
-                    // Check if producer is in RS and has completed execution
+                    // Check if producer is in RS and has completed state update
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                             producer_found_in_rs = true;
-                            // Ready if execution completed (result on CDB)
-                            if (rs_inst.execution_complete) {
+                            // Ready if state update completed (result written via result bus)
+                            if (rs_inst.state_update_cycle > 0) {
                                 producer_completed = true;
                             }
                             break;
