@@ -273,27 +273,28 @@ void run_proc(proc_stats_t* p_stats)
         // SECOND HALF CYCLE
         // ==================================================================
 
-        // 5. Schedule: Move instructions from dispatch queue to RS (program order)
-        while (!dispatch_queue.empty() && schedule_queue.size() < g_rs_size) {
-            proc_inst_t inst = dispatch_queue.front();
-            dispatch_queue.pop_front();
+        // 5. Schedule: Move READY instructions from dispatch queue to RS
+        // Can schedule out of program order - scan entire dispatch queue for ready instructions
+        size_t scheduled_this_cycle = 0;
+        auto dq_it = dispatch_queue.begin();
+        while (dq_it != dispatch_queue.end() && schedule_queue.size() < g_rs_size) {
+            proc_inst_t inst = *dq_it;
 
             inst.schedule_cycle = current_cycle;
 
-            // Initialize ready bits based on whether producer has completed state update
+            // Check if sources are ready
+            bool all_ready = true;
             for (int i = 0; i < 2; i++) {
                 if (inst.src_producer[i] == -1) {
                     // No producer, source is ready
-                    inst.src_ready[i] = true;
+                    continue;
                 } else {
                     // Check if producer has already completed state update
                     bool producer_completed = false;
 
                     // Check if producer is in RS and has completed state update
-                    bool producer_in_rs = false;
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
-                            producer_in_rs = true;
                             // Producer completed if it did state update (will be removed soon)
                             if (rs_inst.state_update_cycle != 0) {
                                 producer_completed = true;
@@ -303,7 +304,7 @@ void run_proc(proc_stats_t* p_stats)
                     }
 
                     // If not in RS, check if in DQ (not completed yet)
-                    if (!producer_in_rs) {
+                    if (!producer_completed) {
                         bool producer_in_dq = false;
                         for (const auto& dq_inst : dispatch_queue) {
                             if (dq_inst.tag == (uint64_t)inst.src_producer[i]) {
@@ -312,19 +313,35 @@ void run_proc(proc_stats_t* p_stats)
                             }
                         }
 
-                        // If not in RS and not in DQ, it completed in a previous cycle
+                        // If not in DQ, it completed in a previous cycle
                         if (!producer_in_dq) {
                             producer_completed = true;
                         }
                     }
 
-                    inst.src_ready[i] = producer_completed;
+                    if (!producer_completed) {
+                        all_ready = false;
+                        break;
+                    }
                 }
             }
 
-            schedule_queue.push_back(inst);
-            printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
-            fflush(stdout);
+            if (all_ready) {
+                // Schedule this instruction (sources are ready)
+                inst.src_ready[0] = true;
+                inst.src_ready[1] = true;
+
+                schedule_queue.push_back(inst);
+                printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
+                fflush(stdout);
+
+                // Remove from dispatch queue
+                dq_it = dispatch_queue.erase(dq_it);
+                scheduled_this_cycle++;
+            } else {
+                // Move to next instruction in dispatch queue
+                ++dq_it;
+            }
         }
 
         // 6. Dispatch: Move instructions from fetch buffer to dispatch queue
