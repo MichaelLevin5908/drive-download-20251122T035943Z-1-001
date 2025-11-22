@@ -1,0 +1,11 @@
+# Compiled binaries
+procsim
+*.o
+
+# Test output files
+*.log
+*_output.log
+my_gcc*.log
+
+# Test trace files (keep only original traces in traces/)
+test*.trace

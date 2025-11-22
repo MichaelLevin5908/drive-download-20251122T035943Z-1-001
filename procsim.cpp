@@ -151,18 +151,11 @@ void run_proc(proc_stats_t* p_stats)
             fflush(stdout);
         }
 
-        // Remove retired instructions from RS
-        for (uint64_t tag : tags_to_remove) {
-            schedule_queue.erase(
-                std::remove_if(schedule_queue.begin(), schedule_queue.end(),
-                    [tag](const proc_inst_t& inst) { return inst.tag == tag; }),
-                schedule_queue.end()
-            );
-        }
+        // NOTE: Do NOT remove from RS here - do it in second half after schedule stage
 
-        // 2. Check for completed executions (latency = 1, so instructions that fired this OR last cycle complete)
+        // 2. Check for completed executions (latency = 1, so instructions that fired in previous cycles complete)
         for (auto& inst : schedule_queue) {
-            if (inst.fired && !inst.execution_complete && inst.execute_cycle <= current_cycle) {
+            if (inst.fired && !inst.execution_complete && inst.execute_cycle < current_cycle) {
                 inst.complete_cycle = current_cycle;
                 inst.execution_complete = true;
                 printf("%lu\tEXECUTED\t%lu\n", current_cycle, inst.tag);
@@ -171,15 +164,52 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
+        // A source becomes ready after its producer completes STATE UPDATE
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
-                    if (inst.src_reg[i] == -1) {
-                        inst.src_ready[i] = true;
-                    } else {
-                        // Source is ready if: register is ready OR written by this instruction (no self-dependency)
-                        inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1 ||
-                                              register_ready[inst.src_reg[i]] == (int64_t)inst.tag);
+                    // Only update if not already ready
+                    if (!inst.src_ready[i] && inst.src_producer[i] != -1) {
+                        // Check if producer did state update this cycle
+                        bool producer_updated = false;
+                        for (uint64_t completed_tag : tags_to_remove) {
+                            if (inst.src_producer[i] == (int64_t)completed_tag) {
+                                producer_updated = true;
+                                break;
+                            }
+                        }
+
+                        // Also check if producer completed state update in a previous cycle
+                        // (not in RS or DQ means it already completed)
+                        if (!producer_updated) {
+                            bool producer_in_rs = false;
+                            for (const auto& rs_inst : schedule_queue) {
+                                if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
+                                    producer_in_rs = true;
+                                    break;
+                                }
+                            }
+
+                            if (!producer_in_rs) {
+                                // Check if producer is in dispatch queue
+                                bool producer_in_dq = false;
+                                for (const auto& dq_inst : dispatch_queue) {
+                                    if (dq_inst.tag == (uint64_t)inst.src_producer[i]) {
+                                        producer_in_dq = true;
+                                        break;
+                                    }
+                                }
+
+                                // If producer not in RS and not in DQ, it already completed state update
+                                if (!producer_in_dq) {
+                                    producer_updated = true;
+                                }
+                            }
+                        }
+
+                        if (producer_updated) {
+                            inst.src_ready[i] = true;
+                        }
                     }
                 }
             }
@@ -230,6 +260,12 @@ void run_proc(proc_stats_t* p_stats)
                 inst->fired = true;
                 inst->execute_cycle = current_cycle;
                 total_fired++;
+
+                // With latency=1, instruction completes in the same cycle it fires
+                inst->execution_complete = true;
+                inst->complete_cycle = current_cycle;
+                printf("%lu\tEXECUTED\t%lu\n", current_cycle, inst->tag);
+                fflush(stdout);
             }
         }
 
@@ -237,21 +273,52 @@ void run_proc(proc_stats_t* p_stats)
         // SECOND HALF CYCLE
         // ==================================================================
 
-        // 5. Schedule: Move from dispatch queue to RS (program order)
+        // 5. Schedule: Move instructions from dispatch queue to RS (program order)
         while (!dispatch_queue.empty() && schedule_queue.size() < g_rs_size) {
             proc_inst_t inst = dispatch_queue.front();
             dispatch_queue.pop_front();
 
             inst.schedule_cycle = current_cycle;
 
-            // Check ready bits
+            // Initialize ready bits based on whether producer has completed state update
             for (int i = 0; i < 2; i++) {
-                if (inst.src_reg[i] == -1) {
+                if (inst.src_producer[i] == -1) {
+                    // No producer, source is ready
                     inst.src_ready[i] = true;
                 } else {
-                    // Source is ready if: register is ready OR written by this instruction (no self-dependency)
-                    inst.src_ready[i] = (register_ready[inst.src_reg[i]] == -1 ||
-                                          register_ready[inst.src_reg[i]] == (int64_t)inst.tag);
+                    // Check if producer has already completed state update
+                    bool producer_completed = false;
+
+                    // Check if producer is in RS and has completed state update
+                    bool producer_in_rs = false;
+                    for (const auto& rs_inst : schedule_queue) {
+                        if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
+                            producer_in_rs = true;
+                            // Producer completed if it did state update (will be removed soon)
+                            if (rs_inst.state_update_cycle != 0) {
+                                producer_completed = true;
+                            }
+                            break;
+                        }
+                    }
+
+                    // If not in RS, check if in DQ (not completed yet)
+                    if (!producer_in_rs) {
+                        bool producer_in_dq = false;
+                        for (const auto& dq_inst : dispatch_queue) {
+                            if (dq_inst.tag == (uint64_t)inst.src_producer[i]) {
+                                producer_in_dq = true;
+                                break;
+                            }
+                        }
+
+                        // If not in RS and not in DQ, it completed in a previous cycle
+                        if (!producer_in_dq) {
+                            producer_completed = true;
+                        }
+                    }
+
+                    inst.src_ready[i] = producer_completed;
                 }
             }
 
@@ -264,7 +331,23 @@ void run_proc(proc_stats_t* p_stats)
         for (auto& inst : fetch_buffer) {
             inst.dispatch_cycle = current_cycle;
 
-            // Mark destination register as not ready
+            // Save producer tags at dispatch time
+            // At this point, register_ready shows the most recent previous writer
+            for (int i = 0; i < 2; i++) {
+                if (inst.src_reg[i] == -1) {
+                    // No source register
+                    inst.src_producer[i] = -1;
+                } else if (inst.src_reg[i] == inst.dest_reg) {
+                    // Self-dependency: instruction reads and writes same register
+                    // This is always ready (no actual dependency)
+                    inst.src_producer[i] = -1;
+                } else {
+                    // Save which instruction will produce this value
+                    inst.src_producer[i] = register_ready[inst.src_reg[i]];
+                }
+            }
+
+            // Mark destination register as not ready (update scoreboard)
             if (inst.dest_reg != -1) {
                 register_ready[inst.dest_reg] = inst.tag;
             }
@@ -275,7 +358,16 @@ void run_proc(proc_stats_t* p_stats)
         }
         fetch_buffer.clear();
 
-        // 7. Fetch: Read instructions from stdin into fetch buffer
+        // 7. Remove state-updated instructions from RS (second half cycle)
+        for (uint64_t tag : tags_to_remove) {
+            schedule_queue.erase(
+                std::remove_if(schedule_queue.begin(), schedule_queue.end(),
+                    [tag](const proc_inst_t& inst) { return inst.tag == tag; }),
+                schedule_queue.end()
+            );
+        }
+
+        // 8. Fetch: Read instructions from stdin into fetch buffer
         if (!done_fetching) {
             for (uint64_t i = 0; i < g_f; i++) {
                 proc_inst_t inst;
@@ -308,6 +400,13 @@ void run_proc(proc_stats_t* p_stats)
                    fetch_buffer.empty() &&
                    dispatch_queue.empty() &&
                    schedule_queue.empty();
+
+        // Progress indicator
+        if (current_cycle % 10000 == 0) {
+            fprintf(stderr, "Cycle %lu: RS=%lu/%lu, DQ=%lu\n",
+                    current_cycle, schedule_queue.size(), g_rs_size,
+                    dispatch_queue.size());
+        }
     }
 
     p_stats->cycle_count = current_cycle;
@@ -319,8 +418,9 @@ void run_proc(proc_stats_t* p_stats)
 void complete_proc(proc_stats_t *p_stats)
 {
     p_stats->retired_instruction = total_retired;
-    p_stats->avg_inst_fired = (float)total_fired / (float)current_cycle;
-    p_stats->avg_inst_retired = (float)total_retired / (float)current_cycle;
-    p_stats->avg_disp_size = (float)total_dispatch_size / (float)current_cycle;
+    // Use the cycle_count that was set in run_proc for consistency
+    p_stats->avg_inst_fired = (float)total_fired / (float)p_stats->cycle_count;
+    p_stats->avg_inst_retired = (float)total_retired / (float)p_stats->cycle_count;
+    p_stats->avg_disp_size = (float)total_dispatch_size / (float)p_stats->cycle_count;
     p_stats->max_disp_size = max_dispatch_size;
 }
