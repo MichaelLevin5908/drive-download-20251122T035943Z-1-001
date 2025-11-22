@@ -164,21 +164,21 @@ void run_proc(proc_stats_t* p_stats)
         }
 
         // 3. Update ready bits for all instructions in RS
-        // A source becomes ready after its producer completes EXECUTION
+        // A source becomes ready after its producer completes STATE UPDATE (writes to register file)
         for (auto& inst : schedule_queue) {
             if (!inst.fired) {
                 for (int i = 0; i < 2; i++) {
                     // Only update if not already ready
                     if (!inst.src_ready[i] && inst.src_producer[i] != -1) {
-                        // Check if producer completed execution
+                        // Check if producer completed state update
                         bool producer_completed = false;
                         bool producer_found_in_rs = false;
 
-                        // Check if producer is in RS and has completed execution
+                        // Check if producer is in RS and has completed state update
                         for (const auto& rs_inst : schedule_queue) {
                             if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                                 producer_found_in_rs = true;
-                                if (rs_inst.execution_complete) {
+                                if (rs_inst.state_update_cycle > 0) {
                                     producer_completed = true;
                                 }
                                 break;
@@ -209,18 +209,18 @@ void run_proc(proc_stats_t* p_stats)
             }
         }
 
-        // ==================================================================
-        // SECOND HALF CYCLE
-        // ==================================================================
-
-        // 5. Schedule: Move READY instructions from dispatch queue to RS
-        // CONSERVATIVE: Only schedule from head (in program order), can't skip blocked instructions
-        // Limit scheduling rate to F per cycle (matches fetch/dispatch bandwidth)
+        // 4. Schedule: Move READY instructions from dispatch queue to RS
+        // This happens in first half, BEFORE firing, so newly scheduled instructions can fire immediately
+        // Hybrid approach: scan from head, schedule ready instructions up to a window limit
+        // This provides some out-of-order capability while maintaining program order preference
         size_t scheduled_this_cycle = 0;
-        while (!dispatch_queue.empty() && schedule_queue.size() < g_rs_size && scheduled_this_cycle < g_f) {
-            proc_inst_t inst = dispatch_queue.front();
-
+        size_t scan_limit = 7;  // Limit how far we scan into DQ
+        size_t scanned = 0;
+        auto it = dispatch_queue.begin();
+        while (it != dispatch_queue.end() && schedule_queue.size() < g_rs_size && scanned < scan_limit) {
+            proc_inst_t inst = *it;
             inst.schedule_cycle = current_cycle;
+            scanned++;
 
             // Check if sources are ready
             bool all_ready = true;
@@ -233,12 +233,12 @@ void run_proc(proc_stats_t* p_stats)
                     bool producer_completed = false;
                     bool producer_found_in_rs = false;
 
-                    // Check if producer is in RS and has completed execution
+                    // Check if producer is in RS and has completed state update
                     for (const auto& rs_inst : schedule_queue) {
                         if (rs_inst.tag == (uint64_t)inst.src_producer[i]) {
                             producer_found_in_rs = true;
-                            // Producer completed if it finished execution (value available on result bus)
-                            if (rs_inst.execution_complete) {
+                            // Producer completed if it finished state update (value written to register file)
+                            if (rs_inst.state_update_cycle > 0) {
                                 producer_completed = true;
                             }
                             break;
@@ -273,20 +273,20 @@ void run_proc(proc_stats_t* p_stats)
                 inst.src_ready[0] = true;
                 inst.src_ready[1] = true;
 
-                dispatch_queue.pop_front();
                 schedule_queue.push_back(inst);
                 printf("%lu\tSCHEDULED\t%lu\n", current_cycle, inst.tag);
                 fflush(stdout);
 
+                it = dispatch_queue.erase(it);  // Remove and advance iterator
                 scheduled_this_cycle++;
             } else {
-                // Head instruction not ready - stop scheduling (must maintain program order)
-                break;
+                // Not ready - skip to next instruction in DQ
+                ++it;
             }
         }
 
-        // 4. Fire ready instructions to function units (in tag order)
-        // This happens AFTER scheduling so newly scheduled instructions can fire immediately
+        // 5. Fire ready instructions to function units (in tag order)
+        // This happens AFTER scheduling so newly scheduled instructions can fire immediately (same cycle)
         std::vector<proc_inst_t*> ready_to_fire;
         for (auto& inst : schedule_queue) {
             if (!inst.fired && inst.src_ready[0] && inst.src_ready[1]) {
@@ -335,6 +335,10 @@ void run_proc(proc_stats_t* p_stats)
                 // With latency=1, instruction will complete next cycle
             }
         }
+
+        // ==================================================================
+        // SECOND HALF CYCLE
+        // ==================================================================
 
         // 6. Dispatch: Move instructions from fetch buffer to dispatch queue
         for (auto& inst : fetch_buffer) {
